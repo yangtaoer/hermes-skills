@@ -82,6 +82,22 @@ Setting it to 0 causes: `TF401320: 字段 剩余工作 发生规则错误。错�
 
 Solution: Don't include RemainingWork in the close operation. Just set state + CompletedWork.
 
+### 11. Cannot Set State=已关闭 on Task Creation
+When creating a task, you CANNOT set `System.State` to `已关闭` in the same POST request — TFS rejects it with "字段'状态'包含的值'已关闭'不在受支持值的列表中". The initial state must be the default (新建). You must create first, then make a separate PATCH call to change the state to 已关闭.
+
+### 12. Closing 用户情景 Requires 3 Evaluation Fields
+When transitioning a 用户情景 to 已关闭, three custom picklist fields become mandatory:
+- **质量评价** (`Custom.a6fb40d4-5f26-4167-b47c-b056ab423f49`)
+- **服务态度** (`Custom.2286db83-008a-4bbc-bdd2-98a779a142d6`)
+- **用户体验** (`Custom.b7a089cf-99c0-4d5c-ab03-8bd3f068194f`)
+
+Typical values (score 5):
+- `5-功能完备可正常运行，满足使用`
+- `5-服务亲切热情且耐心好`
+- `5-界面美观、布局合理、呈现清晰、操作极简`
+
+Without these, you get a 400 with `TF401320: 字段 质量评价 发生规则错误`. To discover valid values, query existing closed items that have these fields populated.
+
 ### 5. AreaPath/IterationPath Backslash Escaping
 When writing JSON via Python string literals, backslashes get eaten. 
 **Solution**: Write JSON to a file first, then use `curl -d @file.json`:
@@ -159,6 +175,76 @@ Valid values (all 5-score):
 To discover valid values for any picklist field, find an existing closed item with values populated:
 ```
 WIQL: SELECT [System.Id] FROM WorkItems WHERE [Custom.a6fb40d4-...] <> '' AND [System.State] = '已关闭'
+```
+
+## Task Creation Workflow (Daily Report Tasks)
+
+### Principles
+1. Every task is fixed 8 hours (OriginalEstimate=8, CompletedWork=8). Do NOT set RemainingWork when closing (leave empty).
+2. User timezone is **UTC+8**. TFS stores UTC, so: local 08:30 = UTC 00:30, local 17:30 = UTC 09:30.
+   - `StartDate` = `{date}T00:30:00Z` (displays as 08:30 local)
+   - `TargetDate` / `FinishDate` = `{date}T09:30:00Z` (displays as 17:30 local)
+3. **Always get current UTC time first**, add 8 hours to get user's local date. Use that local date. Never hardcode dates.
+4. Description MUST use this template:
+   ```
+   1、今日完成开发情况（{具体内容}）
+   2、BUG修复情况（无）
+   3、需求沟通情况（无）
+   4、其他（无）
+   ```
+5. Cannot set State=已关闭 during creation. Must create first (default state 新建), then PATCH to close.
+
+### Step-by-Step
+
+**Step 1: Get current local date**
+```bash
+py -3 -c "from datetime import datetime, timedelta, timezone; now=datetime.now(timezone.utc)+timedelta(hours=8); print(now.strftime('%Y-%m-%d'))"
+```
+
+**Step 2: Write create JSON to file**
+```python
+import json
+date = '2026-05-09'  # from step 1
+patch_data = [
+    {'op': 'add', 'path': '/fields/System.Title', 'value': '任务标题'},
+    {'op': 'add', 'path': '/fields/System.AssignedTo', 'value': 'TELLHOW\\yangtao'},
+    {'op': 'add', 'path': '/fields/System.AreaPath', 'value': 'XiNanArea-New\\四川省区团队'},
+    {'op': 'add', 'path': '/fields/System.IterationPath', 'value': 'XiNanArea-New\\迭代2026-5-1'},
+    {'op': 'add', 'path': '/fields/Microsoft.VSTS.Scheduling.OriginalEstimate', 'value': 8},
+    {'op': 'add', 'path': '/fields/Microsoft.VSTS.Scheduling.RemainingWork', 'value': 8},
+    {'op': 'add', 'path': '/fields/Microsoft.VSTS.Scheduling.StartDate', 'value': f'{date}T00:30:00Z'},
+    {'op': 'add', 'path': '/fields/Microsoft.VSTS.Scheduling.TargetDate', 'value': f'{date}T09:30:00Z'},
+    {'op': 'add', 'path': '/fields/Microsoft.VSTS.Common.Activity', 'value': '开发'},
+    {'op': 'add', 'path': '/fields/System.Description', 'value': '<div>1、今日完成开发情况（）<br>2、BUG修复情况（无）<br>3、需求沟通情况（无）<br>4、其他（无）</div>'},
+    {'op': 'add', 'path': '/relations/-', 'value': {
+        'rel': 'System.LinkTypes.Hierarchy-Reverse',
+        'url': 'http://dev.tellhowsoft.com/DefaultCollection/_apis/wit/workItems/{parent_id}'
+    }}
+]
+with open('tfs_create.json', 'w', encoding='utf-8') as f:
+    json.dump(patch_data, f, ensure_ascii=False)
+```
+
+**Step 3: Create task via curl**
+```bash
+curl -u ":<PAT>" -X POST -H "Content-Type: application/json-patch+json" \
+  -d @tfs_create.json \
+  "http://dev.tellhowsoft.com/DefaultCollection/XiNanArea-New/_apis/wit/workitems/\$%E4%BB%BB%E5%8A%A1?api-version=2.0"
+```
+
+**Step 4: Close task via PATCH**
+```python
+patch_data = [
+    {'op': 'replace', 'path': '/fields/System.State', 'value': '已关闭'},
+    {'op': 'replace', 'path': '/fields/Microsoft.VSTS.Scheduling.CompletedWork', 'value': 8}
+]
+with open('tfs_close.json', 'w', encoding='utf-8') as f:
+    json.dump(patch_data, f, ensure_ascii=False)
+```
+```bash
+curl -u ":<PAT>" -X PATCH -H "Content-Type: application/json-patch+json" \
+  -d @tfs_close.json \
+  "http://dev.tellhowsoft.com/DefaultCollection/_apis/wit/workitems/{task_id}?api-version=2.0"
 ```
 
 ## Quick Reference: Common Operations
