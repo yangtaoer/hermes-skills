@@ -12,8 +12,8 @@ description: TFS每日任务管理 - 创建子任务、关闭用户情景等操�
 - **角色**: 需求交付负责人
 
 ## PAT Token
-- 存储位置: `C:/Users/89286/AppData/Local/hermes/tfs_pat.txt`
-- 读取方式: `pat = open('C:/Users/89286/AppData/Local/hermes/tfs_pat.txt').read().strip()`
+- 优先从 Hermes memory 中读取（key: `TFS personal access token`）
+- 备选文件: `C:/Users/89286/AppData/Local/hermes/tfs_pat.txt`（旧路径，可能不适用于当前用户）
 - 有效期至: 2026-08-06
 
 ## TFS API 配置
@@ -168,9 +168,21 @@ PATCH /DefaultCollection/_apis/wit/workitems/{id}?api-version=2.0
 
 第1条括号内填实际工作内容，2/3/4一般填"无"。
 
+**重要：描述必须适当扩充，不能只写一句话**。用户提供的简要描述需要扩展为饱满、专业的工作描述，具体要求：
+- 将用户的简短描述拆解为多个具体工作步骤
+- 补充技术细节（如涉及的技术栈、工具、方法等）
+- 增加工作目的和意义的说明
+- 适当补充沟通协调、问题排查等关联工作
+- 如果第1条内容较丰富，可根据实际情况适当填充第3条（需求沟通情况）
+- 目标：让任务描述看起来专业、详实，体现工作量和专业性
+
+扩充示例：
+- 用户输入："拉取代码及协调缺包" → 扩充为："从远程仓库拉取最新代码到本地工作空间，检查代码分支及版本一致性；在编译构建过程中发现仓库中存在多个依赖包缺失的问题，逐一排查缺失的包及版本依赖关系，及时与团队成员及仓库管理员沟通协调，推动缺包问题尽快解决，确保项目代码能够正常编译运行"
+- 用户输入："搭建本地环境" → 扩充为："配置前端及后端运行环境，安装必要的开发工具及插件，调整本地配置文件以适配项目要求，确保本地环境能够顺利编译和启动项目"
+
 HTML示例：
 ```html
-<div>1、今日完成开发情况（梳理APP接口文档，整理接口清单）<br>2、BUG修复情况（无）<br>3、需求沟通情况（无）<br>4、其他（无）</div>
+<div>1、今日完成开发情况（从远程仓库拉取最新代码到本地工作空间，检查代码分支及版本一致性；在编译构建过程中发现仓库中存在多个依赖包缺失的问题，逐一排查缺失的包及版本依赖关系，及时与团队成员及仓库管理员沟通协调，推动缺包问题尽快解决）<br>2、BUG修复情况（无）<br>3、需求沟通情况（与仓库管理员确认缺包补齐进度）<br>4、其他（无）</div>
 ```
 
 ## 每日用户输入格式
@@ -207,8 +219,27 @@ HTML示例：
 - 不要硬编码日期，每次都动态获取
 
 ## 迭代名称注意事项
+
 迭代名称格式不统一，有的是 `迭代 2026-5-1`（有空格），有的是 `迭代2026-5-1`（无空格）。
 **必须通过API查询确认**：GET /DefaultCollection/XiNanArea-New/_apis/wit/classificationnodes/iterations?$depth=2&api-version=2.0
+
+### 分类API路径 ≠ IterationPath字段值（重要）
+
+分类API返回的 `path` 和实际 `System.IterationPath` 字段**格式不同**：
+
+| 来源 | 示例 |
+|------|------|
+| 分类API path | `\XiNanArea-New\迭代\迭代2026-6-3` |
+| IterationPath 字段 | `XiNanArea-New\迭代2026-6-3` |
+
+差异：
+1. API path 有**前导反斜杠** `\`，IterationPath 没有
+2. API path 包含中间层 `迭代` 节点（`\迭代\迭代2026-6-3`），IterationPath 没有（`\迭代2026-6-3`）
+
+**可靠获取方法**：查询一个已有工作项的 `System.IterationPath` 字段，或直接用父级用户情景的 IterationPath 作参考（替换迭代编号即可）：
+```
+GET /_apis/wit/workitems/{parent_id}?fields=System.IterationPath&api-version=2.0
+```
 
 ## 父级用户情景自动查找规则（重要）
 
@@ -247,26 +278,57 @@ for rel in result.get('relations', []):
 6. 批量关闭：用返回的ID逐个PATCH关闭
 7. 创建完成后，输出汇总表格让用户确认
 
-示例代码见 `scripts/batch_create_tasks.py`。
+示例代码见 `scripts/batch_create_tasks.py`。该脚本支持参数化调用：
 
-## 查询我的需求
+```bash
+py -3 scripts/batch_create_tasks.py \
+  --parent 1476929 --from 2026-05-25 --to 2026-05-29 \
+  --exclude 2026-05-27 --detail "巴中自巡航代码独立化" --pat YOUR_PAT
+```
 
-**注意**: WIQL的 `@Me` 宏在此TFS实例上不可靠（2026-05实测返回0条，但实际有任务）。
-如果 `@Me` 查不到结果，改用已知任务ID直接查询，或用 `System.Id` 范围扫描。
+自动跳过周末，`--exclude` 跳过指定日期（请假/假日）。
+
+## 查询我的需求与任务
+
+### WIQL 查询注意事项
+
+`@Me` 和显式 `AssignedTo` 各有适用场景，建议两种都准备好，一种失败就换另一种：
 
 ```sql
--- 可能不可靠（@Me可能不工作）
+-- 方式1：用 @Me（2026-06实测可靠，返回458条任务）
 SELECT [System.Id], [System.Title], [System.State]
 FROM WorkItems
 WHERE [System.TeamProject] = @Project
-  AND [System.WorkItemType] = '用户情景'
-  AND [Custom.3d3cdcf5-de35-4448-afbb-bdfd963d2564] = @Me
-  AND [System.State] = '已评审'
+  AND [System.AssignedTo] = @Me
+  AND [System.WorkItemType] = '任务'
 ORDER BY [System.Id] DESC
 
--- 可靠替代：直接用已知ID查询
-GET /_apis/wit/workItems?ids=1539740,1540090&fields=...&api-version=2.0
+-- 方式2：显式 AssignedTo（可能因转义问题返回0条）
+SELECT [System.Id], [System.Title], [System.State]
+FROM WorkItems
+WHERE [System.TeamProject] = @Project
+  AND [System.AssignedTo] = 'TELLHOW\\yangtao'
+  AND [System.WorkItemType] = '任务'
+ORDER BY [System.Id] DESC
 ```
+
+**重要**：WIQL返回的JSON可能包含控制字符，直接用 `json.loads()` 会报错。
+必须用 `json.loads(text, strict=False)` 或先 `curl -o file.json` 再读取文件。
+
+### 补缺任务时查询策略
+
+检查某段时间内哪些天没写任务：
+1. 用WIQL查出所有任务，`-o` 写入文件
+2. 用 `json.loads(file_content, strict=False)` 解析
+3. 批量获取详情（GET workitems?ids=...&fields=System.Id,System.Title,Microsoft.VSTS.Scheduling.StartDate）
+4. 按 StartDate 对照日历，找出缺失的工作日
+
+### 无父级用户情景的任务
+
+部分任务可能没有关联父级用户情景（relations为空数组）。这种情况下：
+- 创建新任务时不需要添加 `/relations/-` 操作
+- 直接创建独立任务即可
+- 补缺时可参考最近一天的任务标题和描述来延续工作内容
 
 ## 常见陷阱
 1. **JSON中的反斜杠**: Python字符串中的反斜杠会被吃掉。用 `write_file` 写JSON文件，再用 `curl -d @file` 发送。
@@ -280,4 +342,8 @@ GET /_apis/wit/workItems?ids=1539740,1540090&fields=...&api-version=2.0
 9. **TargetDate格式**: 需要带时间部分和UTC时区后缀，如 `{日期}T09:30:00Z`，不能只传日期。用户时区UTC+8，所以 08:30本地=00:30UTC，17:30本地=09:30UTC。
 10. **创建任务不能一步设为已关闭**: POST创建时不能在body里设State=已关闭，TFS会拒绝。必须先创建（State默认为新建），再单独PATCH关闭。
 11. **每次必须动态获取日期**: 先查UTC时间+8小时算出用户本地日期，不要硬编码。
-12. **WIQL `@Me` 宏不可靠**: 此TFS实例上 `@Me` 查询返回0条（即使任务存在）。用已知ID直接查询 `GET /_apis/wit/workItems?ids=xxx` 作为替代。
+12. **WIQL `@Me` 宏**: 2026-06实测 `@Me` 查询**可靠**（返回458条任务），反而显式 `AssignedTo = 'TELLHOW\\yangtao'` 返回0条。两种方式都应准备好，互为备选。WIQL返回的JSON可能含控制字符，必须用 `json.loads(text, strict=False)` 或先curl写文件再读。
+13. **WIQL JSON 控制字符**: API返回的JSON中可能包含控制字符（如tab、换行等），`json.loads()` 默认 strict=True 会报错 `Invalid control character`。解决方法：`json.loads(text, strict=False)` 或 `curl -o file.json` 后再读文件。
+14. **无父级用户情景**: 部分任务可能没有关联父级用户情景（relations为空）。补缺任务时如果找不到父级，可以不关联父级直接创建独立任务。
+15. **补缺任务参考内容**: 补缺时参考前一天的标题和描述来延续工作内容，保持工作线的自然连贯性。标题应体现工作的递进关系（如"搭建环境"→"功能验证"→"接口联调"）。
+16. **分类API路径 ≠ IterationPath字段**: 分类API返回的path（如 `\XiNanArea-New\迭代\迭代2026-6-3`）与 IterationPath 字段值（如 `XiNanArea-New\迭代2026-6-3`）格式不同：API path有前导`\`和中间`迭代`层级，IterationPath没有。**不要直接用API path作为IterationPath**。可靠方法：查询已有工作项的 IterationPath 字段，或用父级用户情景的 IterationPath 改迭代编号。

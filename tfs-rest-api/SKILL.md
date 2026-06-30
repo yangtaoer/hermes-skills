@@ -104,7 +104,7 @@ When writing JSON via Python string literals, backslashes get eaten.
 
 ```python
 with open('tfs_update.json', 'w', encoding='utf-8') as f:
-    f.write('[{"op": "replace", "path": "/fields/System.AreaPath", "value": "XiNanArea-New\\\\四川省区团队"}]')
+    f.write('[{"op": "replace", "path": "/fields/System.AreaPath", "value": "XiNanArea-New\\\\\\\\四川省区团队"}]')
 ```
 
 Or use `write_file` tool to write literal JSON, then curl it.
@@ -147,6 +147,17 @@ WIQL returns IDs only. Fetch details in batches of 200:
 ```
 GET /_apis/wit/workitems?ids=1,2,...,200&fields=System.Id,System.Title,System.State&api-version=2.0
 ```
+
+### 11. WIQL @Me vs Explicit AssignedTo
+Both `@Me` and explicit `AssignedTo` should be tried as fallbacks:
+- `@Me`: Worked reliably in 2026-06 testing (returned 458 tasks)
+- `AssignedTo = 'TELLHOW\\yangtao'`: Returned 0 results (possible escaping issue)
+- Try `@Me` first; if it fails, fall back to explicit assignment or known-ID queries
+
+### 12. WIQL Response JSON Control Characters
+WIQL API responses may contain control characters (tabs, newlines) in field values.
+`json.loads()` with default `strict=True` raises `Invalid control character` error.
+Fix: `json.loads(text, strict=False)` or `curl -o file.json` then read the file.
 
 ### 11. Creating Work Items with Chinese Type Names
 The URL path for creating work items with Chinese type names (e.g. `任务`) MUST use URL encoding:

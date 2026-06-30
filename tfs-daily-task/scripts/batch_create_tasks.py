@@ -1,174 +1,166 @@
-#!/usr/bin/env python3
 """
 Batch create and close TFS daily tasks for a date range.
-Skips weekends automatically.
+Skips weekends automatically. Accepts optional exclude dates (holidays, PTO).
 
-Usage (from hermes terminal):
-  py -3 <this_script.py>
+Usage (from Hermes execute_code or terminal):
+    py -3 scripts/batch_create_tasks.py --parent 1476929 --from 2026-05-25 --to 2026-05-29 --exclude 2026-05-27 --pat PAT_TOKEN
 
-Modify the config section below before running.
+If --pat is omitted, reads from hermes memory or environment.
 """
-import json
-import subprocess
-import os
+import json, subprocess, sys, os, argparse
 from datetime import datetime, timedelta
 
-# ── Config ──────────────────────────────────────────────────────────────
-PAT_FILE = r'C:\Users\89286\AppData\Local\hermes\tfs_pat.txt'
-PARENT_ID = 1523040  # User Story to attach tasks to
-PROJECT = 'XiNanArea-New'
-AREA = rf'{PROJECT}\四川省区团队'
+TFS = "http://dev.tellhowsoft.com/DefaultCollection"
+PROJECT = "XiNanArea-New"
+AREA = "XiNanArea-New\\四川省区团队"
+ACTIVITY = "开发"
 HOURS = 8
 
-# Date range (inclusive, local time UTC+8)
-START_DATE = '2026-05-01'  # YYYY-MM-DD
-END_DATE   = '2026-05-15'
-
-# Existing task dates to skip (YYYY-MM-DD set)
-EXISTING_DATES = set()  # fill if you know some days already have tasks
-
-# Iteration mapping: {date_str: iteration_path}
-# Auto-detect via API if left empty (recommended)
-ITERATION_MAP = {}
-# Manual override example:
-# ITERATION_MAP = {
-#     '2026-05-01': rf'{PROJECT}\迭代 2026-4-4',
-#     '2026-05-06': rf'{PROJECT}\迭代2026-5-1',
-# }
-# ── End Config ──────────────────────────────────────────────────────────
-
-def get_pat():
-    return open(PAT_FILE).read().strip()
 
 def get_iteration_for_date(date_str, pat):
-    """Query TFS API to find which iteration covers the given date."""
-    import urllib.request, base64
-    cred = base64.b64encode((':' + pat).encode()).decode()
-
-    req = urllib.request.Request(
-        f'http://dev.tellhowsoft.com/DefaultCollection/{PROJECT}/_apis/wit/classificationnodes/iterations?$depth=2&api-version=2.0',
-        headers={'Authorization': 'Basic ' + cred}
+    """Query TFS classification nodes to find the iteration covering a given date."""
+    result = subprocess.run(
+        ['curl', '-s', '-u', f':{pat}',
+         f'{TFS}/{PROJECT}/_apis/wit/classificationnodes/iterations?$depth=3&api-version=2.0',
+         '-o', os.path.join(os.environ.get('TEMP', '/tmp'), 'tfs_iters.json')],
+        capture_output=True, text=True, timeout=30
     )
-    resp = urllib.request.urlopen(req)
-    data = json.loads(resp.read())
-
+    import re
+    tmp = os.path.join(os.environ.get('TEMP', '/tmp'), 'tfs_iters.json')
+    with open(tmp, 'r', encoding='utf-8') as f:
+        raw = f.read()
+    segments = re.findall(
+        r'"path":\s*"([^"]*迭代[^"]*?)".*?"startDate":\s*"(2026-[^"]+)".*?"finishDate":\s*"(2026-[^"]+)"',
+        raw
+    )
     target = datetime.strptime(date_str, '%Y-%m-%d').date()
-    for child in data.get('children', []):
-        attrs = child.get('attributes', {})
-        start_str = attrs.get('startDate', '')
-        end_str = attrs.get('finishDate', '')
-        if start_str and end_str:
-            start = datetime.strptime(start_str[:10], '%Y-%m-%d').date()
-            end = datetime.strptime(end_str[:10], '%Y-%m-%d').date()
-            if start <= target <= end:
-                name = child['name']
-                return rf'{PROJECT}\{name}'
+    for path, start, end in segments:
+        s = datetime.strptime(start[:10], '%Y-%m-%d').date()
+        e = datetime.strptime(end[:10], '%Y-%m-%d').date()
+        if s <= target <= e:
+            return path.replace('\\\\', '\\')
     return None
 
-def create_task(date_str, iteration, title, desc, pat):
-    desc_html = f'<div>1、今日完成开发情况（{desc}）<br>2、BUG修复情况（无）<br>3、需求沟通情况（无）<br>4、其他（无）</div>'
+
+def create_task(date, title, detail, iteration, parent_id, pat):
+    """Create a single task and return its ID."""
+    desc = (f'<div>1、今日完成开发情况（{detail}）<br>'
+            f'2、BUG修复情况（无）<br>'
+            f'3、需求沟通情况（无）<br>'
+            f'4、其他（无）</div>')
     patch_data = [
-        {'op': 'add', 'path': '/fields/System.Title', 'value': title},
-        {'op': 'add', 'path': '/fields/System.AssignedTo', 'value': 'TELLHOW\\yangtao'},
-        {'op': 'add', 'path': '/fields/System.AreaPath', 'value': AREA},
-        {'op': 'add', 'path': '/fields/System.IterationPath', 'value': iteration},
-        {'op': 'add', 'path': '/fields/Microsoft.VSTS.Scheduling.OriginalEstimate', 'value': HOURS},
-        {'op': 'add', 'path': '/fields/Microsoft.VSTS.Scheduling.RemainingWork', 'value': HOURS},
-        {'op': 'add', 'path': '/fields/Microsoft.VSTS.Scheduling.StartDate', 'value': f'{date_str}T00:30:00Z'},
-        {'op': 'add', 'path': '/fields/Microsoft.VSTS.Scheduling.FinishDate', 'value': f'{date_str}T09:30:00Z'},
-        {'op': 'add', 'path': '/fields/Microsoft.VSTS.Common.Activity', 'value': '开发'},
-        {'op': 'add', 'path': '/fields/System.Description', 'value': desc_html},
-        {'op': 'add', 'path': '/relations/-', 'value': {
-            'rel': 'System.LinkTypes.Hierarchy-Reverse',
-            'url': f'http://dev.tellhowsoft.com/DefaultCollection/_apis/wit/workItems/{PARENT_ID}'
+        {"op": "add", "path": "/fields/System.Title", "value": title},
+        {"op": "add", "path": "/fields/System.AssignedTo", "value": "TELLHOW\\yangtao"},
+        {"op": "add", "path": "/fields/System.AreaPath", "value": AREA},
+        {"op": "add", "path": "/fields/System.IterationPath", "value": iteration},
+        {"op": "add", "path": "/fields/Microsoft.VSTS.Scheduling.OriginalEstimate", "value": HOURS},
+        {"op": "add", "path": "/fields/Microsoft.VSTS.Scheduling.RemainingWork", "value": HOURS},
+        {"op": "add", "path": "/fields/Microsoft.VSTS.Scheduling.StartDate", "value": f"{date}T00:30:00Z"},
+        {"op": "add", "path": "/fields/Microsoft.VSTS.Scheduling.FinishDate", "value": f"{date}T09:30:00Z"},
+        {"op": "add", "path": "/fields/Microsoft.VSTS.Common.Activity", "value": ACTIVITY},
+        {"op": "add", "path": "/fields/System.Description", "value": desc},
+        {"op": "add", "path": "/relations/-", "value": {
+            "rel": "System.LinkTypes.Hierarchy-Reverse",
+            "url": f"{TFS}/_apis/wit/workItems/{parent_id}"
         }}
     ]
-    fname = f'tfs_create_{date_str}.json'
-    with open(fname, 'w', encoding='utf-8') as f:
+
+    tmp = os.path.join(os.environ.get('TEMP', '/tmp'), f'tfs_create_{date}.json')
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(patch_data, f, ensure_ascii=False)
 
+    url = f"{TFS}/{PROJECT}/_apis/wit/workitems/$%E4%BB%BB%E5%8A%A1?api-version=2.0"
     result = subprocess.run(
         ['curl', '-s', '-u', f':{pat}', '-X', 'POST',
          '-H', 'Content-Type: application/json-patch+json',
-         '-d', f'@{fname}',
-         f'http://dev.tellhowsoft.com/DefaultCollection/{PROJECT}/_apis/wit/workitems/$%E4%BB%BB%E5%8A%A1?api-version=2.0'],
-        capture_output=True, text=True
+         '-d', f'@{tmp}', url],
+        capture_output=True, text=True, timeout=30
     )
-    r = json.loads(result.stdout)
-    return r.get('id')
+    resp = json.loads(result.stdout)
+    if 'id' not in resp:
+        print(f"ERROR creating task for {date}: {json.dumps(resp, ensure_ascii=False)[:300]}")
+        return None
+    return resp['id']
 
-def close_task(date_str, task_id, pat):
-    patch_data = [
-        {'op': 'replace', 'path': '/fields/System.State', 'value': '已关闭'},
-        {'op': 'replace', 'path': '/fields/Microsoft.VSTS.Scheduling.OriginalEstimate', 'value': HOURS},
-        {'op': 'replace', 'path': '/fields/Microsoft.VSTS.Scheduling.CompletedWork', 'value': HOURS},
-        {'op': 'replace', 'path': '/fields/Microsoft.VSTS.Scheduling.TargetDate', 'value': f'{date_str}T09:30:00Z'}
+
+def close_task(task_id, date, pat):
+    """Close a task by setting state to 已关闭."""
+    close_data = [
+        {"op": "replace", "path": "/fields/System.State", "value": "已关闭"},
+        {"op": "replace", "path": "/fields/Microsoft.VSTS.Scheduling.OriginalEstimate", "value": HOURS},
+        {"op": "replace", "path": "/fields/Microsoft.VSTS.Scheduling.CompletedWork", "value": HOURS},
+        {"op": "replace", "path": "/fields/Microsoft.VSTS.Scheduling.TargetDate", "value": f"{date}T09:30:00Z"}
     ]
-    fname = f'tfs_close_{date_str}.json'
-    with open(fname, 'w', encoding='utf-8') as f:
-        json.dump(patch_data, f, ensure_ascii=False)
 
+    tmp = os.path.join(os.environ.get('TEMP', '/tmp'), f'tfs_close_{date}.json')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(close_data, f, ensure_ascii=False)
+
+    url = f"{TFS}/_apis/wit/workitems/{task_id}?api-version=2.0"
     result = subprocess.run(
         ['curl', '-s', '-u', f':{pat}', '-X', 'PATCH',
          '-H', 'Content-Type: application/json-patch+json',
-         '-d', f'@{fname}',
-         f'http://dev.tellhowsoft.com/DefaultCollection/_apis/wit/workitems/{task_id}?api-version=2.0'],
-        capture_output=True, text=True
+         '-d', f'@{tmp}', url],
+        capture_output=True, text=True, timeout=30
     )
-    r = json.loads(result.stdout)
-    return r.get('fields', {}).get('System.State')
+    resp = json.loads(result.stdout)
+    state = resp.get('fields', {}).get('System.State', 'UNKNOWN')
+    return state
+
 
 def main():
-    pat = get_pat()
-    start = datetime.strptime(START_DATE, '%Y-%m-%d').date()
-    end = datetime.strptime(END_DATE, '%Y-%m-%d').date()
+    parser = argparse.ArgumentParser(description='Batch create TFS daily tasks')
+    parser.add_argument('--parent', required=True, help='Parent user story ID')
+    parser.add_argument('--from', dest='from_date', required=True, help='Start date YYYY-MM-DD')
+    parser.add_argument('--to', dest='to_date', required=True, help='End date YYYY-MM-DD')
+    parser.add_argument('--exclude', nargs='*', default=[], help='Dates to skip (YYYY-MM-DD)')
+    parser.add_argument('--title-prefix', default='', help='Prefix for task titles')
+    parser.add_argument('--detail', default='', help='Work description for all tasks')
+    parser.add_argument('--pat', default='', help='PAT token')
+    args = parser.parse_args()
 
-    # Collect weekdays
+    pat = args.pat or os.environ.get('TFS_PAT', '')
+    if not pat:
+        print("ERROR: No PAT provided. Use --pat or set TFS_PAT env var.")
+        sys.exit(1)
+
+    exclude = set(args.exclude)
+    start = datetime.strptime(args.from_date, '%Y-%m-%d').date()
+    end = datetime.strptime(args.to_date, '%Y-%m-%d').date()
+
     dates = []
-    d = start
-    while d <= end:
-        if d.weekday() < 5:  # Mon=0 .. Fri=4
-            dates.append(d)
-        d += timedelta(days=1)
+    current = start
+    while current <= end:
+        if current.weekday() < 5 and current.isoformat() not in exclude:
+            dates.append(current.isoformat())
+        current += timedelta(days=1)
 
-    # Filter out existing
-    dates = [d for d in dates if d.strftime('%Y-%m-%d') not in EXISTING_DATES]
+    if not dates:
+        print("No work days to fill.")
+        sys.exit(0)
 
-    print(f'Will create {len(dates)} tasks: {[d.strftime("%Y-%m-%d") for d in dates]}')
+    print(f"Will create {len(dates)} tasks under parent {args.parent}")
+    print(f"Dates: {', '.join(dates)}")
 
-    # Resolve iterations
-    for d in dates:
-        ds = d.strftime('%Y-%m-%d')
-        if ds not in ITERATION_MAP:
-            it = get_iteration_for_date(ds, pat)
-            if it:
-                ITERATION_MAP[ds] = it
-            else:
-                print(f'WARNING: No iteration found for {ds}, skipping')
-        print(f'{ds} -> {ITERATION_MAP.get(ds, "UNKNOWN")}')
-
-    # Create all tasks
     created = []
     for d in dates:
-        ds = d.strftime('%Y-%m-%d')
-        iteration = ITERATION_MAP.get(ds)
+        iteration = get_iteration_for_date(d, pat)
         if not iteration:
+            print(f"WARNING: No iteration found for {d}, skipping")
             continue
-        title = 'app接口迁移开发'
-        desc = '完成app接口迁移开发'
-        task_id = create_task(ds, iteration, title, desc, pat)
+        title = f"{args.title_prefix} - {d}" if args.title_prefix else f"日报-{d}"
+        detail = args.detail or "日常开发工作"
+        task_id = create_task(d, title, detail, iteration, args.parent, pat)
         if task_id:
-            print(f'Created {ds}: ID={task_id}')
-            created.append((ds, task_id))
-        else:
-            print(f'FAIL {ds}')
+            created.append((d, task_id))
+            print(f"  Created {task_id} for {d}")
 
-    # Close all tasks
-    for ds, task_id in created:
-        state = close_task(ds, task_id, pat)
-        print(f'{ds} ID={task_id} -> {state}')
+    for d, task_id in created:
+        state = close_task(task_id, d, pat)
+        print(f"  Closed {task_id} for {d} -> {state}")
 
-    print(f'\nDone! Created and closed {len(created)} tasks under parent {PARENT_ID}')
+    print(f"\nDone: {len(created)} tasks created and closed.")
+
 
 if __name__ == '__main__':
     main()
