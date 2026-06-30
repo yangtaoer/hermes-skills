@@ -17,8 +17,17 @@ ACTIVITY = "开发"
 HOURS = 8
 
 
+def iteration_path_from_classification_path(path):
+    """Convert classification API path to System.IterationPath field value."""
+    normalized = path.replace('\\\\', '\\').lstrip('\\')
+    prefix = PROJECT + '\\迭代\\'
+    if normalized.startswith(prefix):
+        return PROJECT + '\\' + normalized[len(prefix):]
+    return normalized
+
+
 def get_iteration_for_date(date_str, pat):
-    """Query TFS classification nodes to find the iteration covering a given date."""
+    """Find the System.IterationPath for the task StartDate."""
     result = subprocess.run(
         ['curl', '-s', '-u', f':{pat}',
          f'{TFS}/{PROJECT}/_apis/wit/classificationnodes/iterations?$depth=3&api-version=2.0',
@@ -38,7 +47,7 @@ def get_iteration_for_date(date_str, pat):
         s = datetime.strptime(start[:10], '%Y-%m-%d').date()
         e = datetime.strptime(end[:10], '%Y-%m-%d').date()
         if s <= target <= e:
-            return path.replace('\\\\', '\\')
+            return iteration_path_from_classification_path(path)
     return None
 
 

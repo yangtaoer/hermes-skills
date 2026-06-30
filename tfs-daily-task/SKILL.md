@@ -75,7 +75,7 @@ PATCH /DefaultCollection/_apis/wit/workitems/{id}?api-version=2.0
 - OriginalEstimate: 初始估计工时
 - CompletedWork: 完成工时
 - Activity: "开发"（默认）
-- IterationPath: 当前迭代（格式：`XiNanArea-New\迭代2026-5-1`，注意迭代名可能没有空格）
+- IterationPath: 由任务开始日期确定的迭代（格式：`XiNanArea-New\迭代2026-5-1`，注意迭代名可能没有空格）
 - AreaPath: `XiNanArea-New\四川省区团队`
 - 关联父级: System.LinkTypes.Hierarchy-Reverse -> 用户情景ID
 
@@ -203,7 +203,7 @@ HTML示例：
 
 ## 自动处理的固定项
 - 区域: XiNanArea-New\四川省区团队
-- 迭代: 当前日期所在迭代（需要查API确认名称，注意空格问题）
+- 迭代: 必须按任务开始日期所属迭代确定（需要查API确认名称，不能直接沿用父级用户情景的迭代）
 - 活动: 开发
 - 状态: 创建后直接关闭（必须分两步：先创建再PATCH关闭）
 - 初始估计 = 完成工作 = 8（每个任务固定8小时）
@@ -213,7 +213,8 @@ HTML示例：
 
 用户时区 **UTC+8**。TFS存储UTC时间。每次建任务必须先获取当前UTC时间，加8小时算出用户本地日期。
 
-- 先执行 `py -3 -c "from datetime import datetime, timezone, timedelta; now=datetime.now(timezone.utc)+timedelta(hours=8); print(now.strftime('%Y-%m-%d'))"` 获取本地日期
+- 未指定补录日期时，先执行 `py -3 -c "from datetime import datetime, timezone, timedelta; now=datetime.now(timezone.utc)+timedelta(hours=8); print(now.strftime('%Y-%m-%d'))"` 获取本地日期
+- 指定补录日期时，以用户指定的任务日期作为本地日期；不要用当前日期覆盖补录日期
 - **StartDate** = `{本地日期}T00:30:00Z`（用户看到 08:30）
 - **TargetDate/FinishDate** = `{本地日期}T09:30:00Z`（用户看到 17:30）
 - 不要硬编码日期，每次都动态获取
@@ -221,7 +222,16 @@ HTML示例：
 ## 迭代名称注意事项
 
 迭代名称格式不统一，有的是 `迭代 2026-5-1`（有空格），有的是 `迭代2026-5-1`（无空格）。
-**必须通过API查询确认**：GET /DefaultCollection/XiNanArea-New/_apis/wit/classificationnodes/iterations?$depth=2&api-version=2.0
+**必须通过API按任务开始日期查询确认**：GET /DefaultCollection/XiNanArea-New/_apis/wit/classificationnodes/iterations?$depth=3&api-version=2.0
+
+### 迭代必须按 StartDate 确定
+
+创建任务前必须先确定任务的本地日期，再用该日期匹配迭代节点的 `startDate` / `finishDate`：
+
+1. 今日任务：用 UTC 当前时间 + 8 小时得到本地日期。
+2. 补录任务：用用户指定的补录日期。
+3. 批量补录：每个日期分别匹配自己的迭代，不能整批共用一个迭代。
+4. 父级用户情景的 `System.IterationPath` 只能作为兜底参考或排错线索，不能作为子任务迭代来源。
 
 ### 分类API路径 ≠ IterationPath字段值（重要）
 
@@ -236,9 +246,17 @@ HTML示例：
 1. API path 有**前导反斜杠** `\`，IterationPath 没有
 2. API path 包含中间层 `迭代` 节点（`\迭代\迭代2026-6-3`），IterationPath 没有（`\迭代2026-6-3`）
 
-**可靠获取方法**：查询一个已有工作项的 `System.IterationPath` 字段，或直接用父级用户情景的 IterationPath 作参考（替换迭代编号即可）：
-```
-GET /_apis/wit/workitems/{parent_id}?fields=System.IterationPath&api-version=2.0
+**可靠转换方法**：分类 API 匹配到日期所在节点后，把 path 转成字段值：
+
+1. 去掉前导 `\`
+2. 去掉中间层 `\迭代\`
+3. 保留真实叶子节点名称，包括其中可能存在的空格
+
+示例：
+
+```text
+\XiNanArea-New\迭代\迭代2026-6-3 -> XiNanArea-New\迭代2026-6-3
+\XiNanArea-New\迭代\迭代 2026-5-1 -> XiNanArea-New\迭代 2026-5-1
 ```
 
 ## 父级用户情景自动查找规则（重要）
@@ -272,7 +290,7 @@ for rel in result.get('relations', []):
 流程：
 1. **询问排除日期**：用 clarify 工具询问用户"以下哪些日期不需要补录？（如法定假日、请假等）"，列出所有待补的工日供用户选择或补充
 2. 确认日期范围，排除周末（六日）和用户指定的排除日期
-3. 确定每个日期所属迭代（查API），注意迭代名空格问题
+3. 按每个补录日期的 StartDate 分别确定所属迭代（查API），注意迭代名空格问题
 4. 用一个父级用户情景（用户指定或从邻近任务取，遵循"父级用户情景自动查找规则"）
 5. 批量创建：Python写JSON文件 → subprocess调curl创建 → 记录返回的ID
 6. 批量关闭：用返回的ID逐个PATCH关闭
@@ -334,7 +352,7 @@ ORDER BY [System.Id] DESC
 1. **JSON中的反斜杠**: Python字符串中的反斜杠会被吃掉。用 `write_file` 写JSON文件，再用 `curl -d @file` 发送。
 2. **RemainingWork关闭时**: 不能传0，必须不传这个字段。
 3. **API URL**: 创建工作项必须包含项目名 `/XiNanArea-New/_apis/wit/workitems/$%E4%BB%BB%E5%8A%A1`（URL编码），更新可以用全局路径。
-4. **迭代名称**: 格式不统一，每次查API确认。
+4. **迭代名称**: 格式不统一，每次必须按任务 StartDate 查API确认。
 5. **任务活动字段**: 是必填的，默认值为"开发"。
 6. **Python urllib不能用中文URL**: 创建任务时URL包含中文类型名`任务`，Python urllib会报UnicodeEncodeError。**必须用curl**。
 7. **创建URL的$符号**: curl中`$%E4%BB%BB%E5%8A%A1`的$需要转义为`\$`，或用单引号包裹URL。
@@ -346,4 +364,4 @@ ORDER BY [System.Id] DESC
 13. **WIQL JSON 控制字符**: API返回的JSON中可能包含控制字符（如tab、换行等），`json.loads()` 默认 strict=True 会报错 `Invalid control character`。解决方法：`json.loads(text, strict=False)` 或 `curl -o file.json` 后再读文件。
 14. **无父级用户情景**: 部分任务可能没有关联父级用户情景（relations为空）。补缺任务时如果找不到父级，可以不关联父级直接创建独立任务。
 15. **补缺任务参考内容**: 补缺时参考前一天的标题和描述来延续工作内容，保持工作线的自然连贯性。标题应体现工作的递进关系（如"搭建环境"→"功能验证"→"接口联调"）。
-16. **分类API路径 ≠ IterationPath字段**: 分类API返回的path（如 `\XiNanArea-New\迭代\迭代2026-6-3`）与 IterationPath 字段值（如 `XiNanArea-New\迭代2026-6-3`）格式不同：API path有前导`\`和中间`迭代`层级，IterationPath没有。**不要直接用API path作为IterationPath**。可靠方法：查询已有工作项的 IterationPath 字段，或用父级用户情景的 IterationPath 改迭代编号。
+16. **分类API路径 ≠ IterationPath字段**: 分类API返回的path（如 `\XiNanArea-New\迭代\迭代2026-6-3`）与 IterationPath 字段值（如 `XiNanArea-New\迭代2026-6-3`）格式不同：API path有前导`\`和中间`迭代`层级，IterationPath没有。**不要直接用API path作为IterationPath**。必须先按任务 StartDate 匹配节点，再转换为字段值。
